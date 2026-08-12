@@ -1,0 +1,401 @@
+"""
+T20 Cricket Scorer
+==================
+
+A simple command-line T20 cricket scorer written in Python.
+
+Type what happens on each ball (runs, wickets, wides, no-balls, byes,
+leg byes) and watch a live scoreboard update after every delivery.
+The undo command ("u") rewinds the last ball, and after both innings
+the winner is announced.
+
+Run it with:  python3 cricket.py
+
+Inputs:
+    0, 1, 2, 3, 4, 6    runs off the bat
+    w                   wicket
+    wd                  wide
+    nb                  no ball
+    lb                  leg bye (you'll be asked how many)
+    bye                 bye (you'll be asked how many)
+    u                   undo last ball
+    q                   quit early
+
+Built for learning Python: functions, dictionaries, loops,
+f-strings and undo with history tuples.
+"""
+
+TOTAL_OVERS = 20
+BALLS_PER_OVER = 6
+
+
+# ---------------------------------------------------------------
+# State (reset at the start of every innings)
+# ---------------------------------------------------------------
+
+team_name = ""
+runs = 0
+wickets = 0
+ball_number = 0  # legal balls bowled so far (extra balls are not counted)
+last_ball = None
+
+batsman1 = ""    # striker's slot
+batsman2 = ""    # non-striker's slot
+striker = 1
+batsman_scores = {}   # name -> runs
+batsman_balls = {}    # name -> balls faced
+batsman_out = {}      # name -> True if dismissed
+
+bowler = ""
+bowler_balls = 0
+bowler_runs = 0
+bowler_wickets = 0
+
+# Every event is stored as a tuple so "u" can undo it perfectly:
+#   ("runs", n, striker_before, ball_number_before)
+#   ("wd", striker_before, ball_number_before)
+#   ("nb", striker_before, ball_number_before)
+#   ("lb", n, striker_before, ball_number_before)
+#   ("bye", n, striker_before, ball_number_before)
+#   ("w", name, how, striker_before, ball_number_before)
+history = []
+
+
+# ---------------------------------------------------------------
+# Display
+# ---------------------------------------------------------------
+
+def format_last(entry):
+    """Turn a history entry into a short label for the scoreboard."""
+    kind = entry[0]
+    if kind == "runs":
+        return str(entry[1])
+    if kind == "wd":
+        return "WD +1"
+    if kind == "nb":
+        return "NB +1"
+    if kind == "lb":
+        return f"LB +{entry[1]}"
+    if kind == "bye":
+        return f"BYE +{entry[1]}"
+    if kind == "w":
+        return f"W ({entry[1]} {entry[2]})"
+    return "?"
+
+
+def print_scoreboard():
+    """Print the full current scoreboard."""
+    print()
+    print("=" * 44)
+    print(f" {team_name}  {runs}/{wickets}")
+    overs, balls = divmod(ball_number, BALLS_PER_OVER)
+    print(f" Overs: {overs}.{balls}  |  Last ball: {last_ball}")
+    print("-" * 44)
+
+    on_strike = batsman1 if striker == 1 else batsman2
+    other = batsman2 if striker == 1 else batsman1
+    print(f" {on_strike:16s} (striker)  {batsman_scores.get(on_strike, 0)} ({batsman_balls.get(on_strike, 0)}b)")
+    print(f" {other:16s}            {batsman_scores.get(other, 0)} ({batsman_balls.get(other, 0)}b)")
+
+    print("-" * 44)
+    overs, balls = divmod(bowler_balls, BALLS_PER_OVER)
+    print(f" {bowler:16s}  {overs}.{balls}-{bowler_runs}-{bowler_wickets}")
+    print("=" * 44)
+
+
+def print_end_of_innings():
+    """Show the final score and the full batting card."""
+    overs, balls = divmod(ball_number, BALLS_PER_OVER)
+    print()
+    print("#" * 44)
+    print(f" END OF INNINGS - {team_name}")
+    print(f" Final score: {runs}/{wickets} in {overs}.{balls} overs")
+    print("#" * 44)
+    print(" Batting card:")
+    for name, score in batsman_scores.items():
+        status = "out" if batsman_out.get(name) else "not out"
+        print(f"   {name:20s} {score} ({batsman_balls.get(name, 0)}b)  {status}")
+    print()
+
+
+# ---------------------------------------------------------------
+# Batsman helpers
+# ---------------------------------------------------------------
+
+def add_batsman():
+    """Ask for a new batsman's name and register them in the batting card."""
+    new = input("   New batsman in: ").strip()
+    while new == "" or new in batsman_scores:
+        if new == "":
+            new = input("   Name cannot be empty. New batsman in: ").strip()
+        else:
+            new = input(f"   '{new}' is already in the batting order. Try again: ").strip()
+    batsman_scores[new] = 0
+    batsman_balls[new] = 0
+    batsman_out[new] = False
+    return new
+
+
+def who_is_batting(slot):
+    """Return the name in a batting slot (1 = striker, 2 = non-striker)."""
+    return batsman1 if slot == 1 else batsman2
+
+
+def swap_strike():
+    """Swap the striker and non-striker."""
+    global striker
+    striker = 3 - striker
+
+
+def end_of_over():
+    """Swap the batsmen after a completed over."""
+    print("\n   *** End of over - batsmen swap ends ***")
+    if wickets < 10:
+        swap_strike()
+
+
+# ---------------------------------------------------------------
+# Ball-by-ball logic
+# ---------------------------------------------------------------
+
+def record_ball(code):
+    """Process one ball. Returns 'done', 'quit' or 'all_out'."""
+    global runs, wickets, ball_number, last_ball, batsman1, batsman2
+    global bowler_balls, bowler_runs, bowler_wickets
+
+    code = code.strip().lower()
+
+    if code == "q":
+        return "quit"
+    if code == "u":
+        undo_last_ball()
+        return "done"
+
+    if code not in ("0", "1", "2", "3", "4", "6", "w", "wd", "nb", "lb", "bye"):
+        print(f"   Unknown entry '{code}'. Try 0,1,2,3,4,6,w,wd,nb,lb,bye,u")
+        return "done"
+
+    # --- Wide: one run, no ball counts against the over ---
+    if code == "wd":
+        runs += 1
+        bowler_runs += 1
+        history.append(("wd", striker, ball_number))
+        last_ball = format_last(history[-1])
+        print_scoreboard()
+        return "done"
+
+    # --- No ball: one run, free hit comes next ---
+    if code == "nb":
+        runs += 1
+        bowler_runs += 1
+        history.append(("nb", striker, ball_number))
+        last_ball = format_last(history[-1])
+        print_scoreboard()
+        return "done"
+
+    # --- Leg bye: runs as extras, no ball count deducted from the bowler ---
+    if code == "lb":
+        extra = int(input("   Leg bye runs (0-4): ") or "0")
+        runs += extra
+        history.append(("lb", extra, striker, ball_number))
+        if extra > 0 and wickets < 10:
+            swap_strike()
+        bowler_balls += 1
+        ball_number += 1
+        if ball_number % BALLS_PER_OVER == 0:
+            end_of_over()
+        last_ball = format_last(history[-1])
+        print_scoreboard()
+        return "done"
+
+    # --- Bye: runs as extras, no ball count deducted from the bowler ---
+    if code == "bye":
+        extra = int(input("   Bye runs (0-4): ") or "0")
+        runs += extra
+        history.append(("bye", extra, striker, ball_number))
+        if extra > 0 and wickets < 10:
+            swap_strike()
+        bowler_balls += 1
+        ball_number += 1
+        if ball_number % BALLS_PER_OVER == 0:
+            end_of_over()
+        last_ball = format_last(history[-1])
+        print_scoreboard()
+        return "done"
+
+    # --- Wicket ---
+    if code == "w":
+        how = input("   How was the batsman out? (b/lbw/c/runout/stumped): ").strip() or "b"
+        current = who_is_batting(striker)
+        batsman_out[current] = True
+        wickets += 1
+        bowler_wickets += 1
+        history.append(("w", current, how, striker, ball_number))
+        bowler_balls += 1
+        ball_number += 1
+
+        if wickets < 10:
+            new = add_batsman()
+            if striker == 1:
+                batsman1 = new
+            else:
+                batsman2 = new
+            if ball_number % BALLS_PER_OVER == 0:
+                end_of_over()
+            last_ball = format_last(history[-1])
+            print_scoreboard()
+            return "done"
+        else:
+            print("   All out!")
+            last_ball = format_last(history[-1])
+            return "all_out"
+
+    # --- Runs off the bat ---
+    n = int(code)
+    batter = who_is_batting(striker)
+    runs += n
+    bowler_runs += n
+    batsman_scores[batter] = batsman_scores.get(batter, 0) + n
+    batsman_balls[batter] = batsman_balls.get(batter, 0) + 1
+    history.append(("runs", n, striker, ball_number))
+    if n % 2 == 1 and wickets < 10:
+        swap_strike()
+    bowler_balls += 1
+    ball_number += 1
+    if ball_number % BALLS_PER_OVER == 0:
+        end_of_over()
+    last_ball = format_last(history[-1])
+    print_scoreboard()
+    return "done"
+
+
+# ---------------------------------------------------------------
+# Undo
+# ---------------------------------------------------------------
+
+def undo_last_ball():
+    """Reverse the most recent ball using the stored history entry."""
+    global runs, wickets, ball_number, last_ball, striker, batsman1, batsman2
+    global bowler_balls, bowler_runs, bowler_wickets
+
+    if not history:
+        print("   Nothing to undo yet.")
+        return
+
+    entry = history.pop()
+    kind = entry[0]
+    print(f"   Undoing: {format_last(entry)}")
+
+    if kind in ("wd", "nb"):
+        runs -= 1
+        bowler_runs -= 1
+    elif kind in ("lb", "bye"):
+        runs -= entry[1]
+        bowler_balls -= 1
+    elif kind == "w":
+        name, how = entry[1], entry[2]
+        wickets -= 1
+        bowler_wickets -= 1
+        bowler_balls -= 1
+        batsman_out[name] = False
+        # The replacement batsman (if any) sits in the dismissed batsman's
+        # old slot; put the dismissed batsman back and remove the replacement.
+        replacement = who_is_batting(entry[3])
+        if replacement != name:
+            del batsman_scores[replacement]
+            del batsman_balls[replacement]
+            del batsman_out[replacement]
+            if entry[3] == 1:
+                batsman1 = name
+            else:
+                batsman2 = name
+    else:  # regular runs
+        n = entry[1]
+        runs -= n
+        bowler_runs -= n
+        batter = who_is_batting(entry[3])
+        batsman_scores[batter] = batsman_scores.get(batter, 0) - n
+        batsman_balls[batter] = batsman_balls.get(batter, 0) - 1
+        bowler_balls -= 1
+
+    striker = entry[-2]
+    ball_number = entry[-1]
+    last_ball = format_last(history[-1]) if history else None
+    print_scoreboard()
+
+
+# ---------------------------------------------------------------
+# Innings flow
+# ---------------------------------------------------------------
+
+def play_innings(name):
+    """Play one T20 innings. Returns (runs, wickets)."""
+    global team_name, runs, wickets, ball_number, last_ball, batsman1, batsman2
+    global striker, batsman_scores, batsman_balls, batsman_out
+    global bowler, bowler_balls, bowler_runs, bowler_wickets, history
+
+    team_name = name
+    runs = 0
+    wickets = 0
+    ball_number = 0
+    last_ball = None
+    striker = 1
+    batsman_scores = {}
+    batsman_balls = {}
+    batsman_out = {}
+    bowler_balls = 0
+    bowler_runs = 0
+    bowler_wickets = 0
+    history = []
+
+    print()
+    print(f"=== {team_name} are batting ===")
+    batsman1 = add_batsman()
+    batsman2 = add_batsman()
+    bowler = input("   Bowler: ").strip()
+    while bowler == "":
+        bowler = input("   Bowler name cannot be empty: ").strip()
+
+    print("\n   Enter what happens each ball.")
+    print("   0,1,2,3,4,6 runs | w wicket | wd wide | nb no-ball | lb leg bye | bye bye | u undo | q quit")
+
+    while ball_number < TOTAL_OVERS * BALLS_PER_OVER and wickets < 10:
+        result = record_ball(input("   Ball: "))
+        if result in ("quit", "all_out"):
+            break
+
+    return runs, wickets
+
+
+# ---------------------------------------------------------------
+# Match flow
+# ---------------------------------------------------------------
+
+def main():
+    print("==============================")
+    print("    T20 CRICKET SCORER")
+    print("==============================")
+
+    team1 = input("Team 1 name: ").strip() or "Team 1"
+    team2 = input("Team 2 name: ").strip() or "Team 2"
+
+    score1, _ = play_innings(team1)
+    print_end_of_innings()
+
+    print(f"\n{team2} need {score1 + 1} to win.")
+    input("Press Enter to start the second innings...")
+    score2, wick2 = play_innings(team2)
+    print_end_of_innings()
+
+    print("\n==============================")
+    if score1 > score2:
+        print(f" {team1} win by {score1 - score2} runs!")
+    elif score2 > score1:
+        print(f" {team2} win by {10 - wick2} wickets!")
+    else:
+        print(" Match tied!")
+    print("==============================")
+
+
+if __name__ == "__main__":
+    main()
